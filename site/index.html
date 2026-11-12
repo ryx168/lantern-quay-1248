@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>猜猜這一站 · Guess the Stop · XO Tours</title>
+<!--
+  Phase 0 prototype, deployed to GitHub Pages by .github/workflows/deploy.yml (no backend yet).
+  One fixed puzzle of five stops drawn from places_data/*.json, inlined below.
+  360 view: Pannellum for stops with our own equirectangular photos, Google Street View
+  otherwise (loaded lazily, with gm_authFailure fallback to the stop photo).
+  Guess map: MapLibre + Carto Voyager tiles (same style the site already uses).
+-->
+<link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css">
+<link rel="stylesheet" href="vendor/pannellum/pannellum.css">
+<style>
+  :root{
+    --bg:#0f1216;--panel:#171c23;--panel2:#1f2630;--line:#2b3440;--text:#f2f4f7;--muted:#9aa5b4;
+    --accent:#ff8a3d;--accent2:#ffb07a;--good:#43c97a;--mid:#f2c94c;--bad:#ef5a5a;--link:#7cc4ff;
+    --radius:14px;--shadow:0 10px 30px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Microsoft JhengHei","Noto Sans TC",Roboto,sans-serif}
+  a{color:var(--link)}
+  button{font:inherit;cursor:pointer;border:0;border-radius:10px}
+  .gbtn{background:var(--accent);color:#1a1200;font-weight:700;padding:12px 22px;font-size:16px;box-shadow:0 4px 14px rgba(255,138,61,.35);transition:transform .08s,background .15s}
+  .gbtn:hover{background:var(--accent2)} .gbtn:active{transform:translateY(1px)}
+  .gbtn[disabled]{opacity:.45;cursor:not-allowed;box-shadow:none}
+  .gbtn-ghost{background:transparent;color:var(--text);border:1px solid var(--line);padding:10px 16px}
+  .gbtn-ghost:hover{background:var(--panel2)}
+  .hidden{display:none!important}
+
+  /* ---------- screens ---------- */
+  .screen{position:fixed;inset:0;display:flex;flex-direction:column;z-index:950}  /* above the middleware cookie notice (900): a fixed element is its own stacking context */
+  #intro,#end{align-items:center;justify-content:center;padding:24px;text-align:center;overflow:auto;background:var(--bg)}
+  .gcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;max-width:560px;width:100%}
+  .brand{font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+  h1{font-size:30px;margin:0 0 8px;line-height:1.2;color:var(--text)}
+  h2{font-size:22px;margin:0 0 6px;color:var(--text)}
+  .glead{color:var(--muted);margin:0 0 20px}
+  .rules{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 0 22px;padding:0;list-style:none;text-align:left}
+  .rules li{background:var(--panel2);border-radius:10px;padding:12px;font-size:13px;color:var(--muted)}
+  .rules b{display:block;color:var(--text);font-size:15px;margin-bottom:2px}
+  .topbar{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-bottom:14px}
+  .lang button{background:transparent;color:var(--muted);padding:4px 8px;border:1px solid var(--line);border-radius:999px;font-size:12px}
+  .lang button.on{color:var(--text);border-color:var(--accent);background:rgba(255,138,61,.12)}
+
+  /* ---------- game ---------- */
+  #game{background:#000}
+  #pano{position:absolute;inset:0;background:#000}
+  #pano .pnlm-container{background:#000}
+  #photoFallback{position:absolute;inset:0;background:#000 center/cover no-repeat}
+  #photoFallback .note{position:absolute;left:12px;bottom:12px;background:rgba(0,0,0,.6);color:#ddd;font-size:12px;padding:6px 10px;border-radius:8px}
+  .hud{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:flex-start;padding:12px;gap:10px;pointer-events:none;z-index:905}
+  .hud>*{pointer-events:auto}
+  .chip{background:rgba(15,18,22,.82);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:12px;padding:8px 12px;font-size:13px;display:flex;gap:14px;align-items:center}
+  .chip b{font-size:16px}
+  .chip .muted{color:var(--muted)}
+  #hints{position:absolute;top:64px;left:12px;z-index:905;display:flex;flex-direction:column;gap:6px;max-width:min(60vw,320px)}
+  .hint{background:rgba(15,18,22,.82);backdrop-filter:blur(8px);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:8px 12px;font-size:13px;animation:pop .25s ease-out}
+  .hint.locked{border-left-color:var(--line);color:var(--muted)}
+  @keyframes pop{from{transform:translateY(-6px);opacity:0}to{transform:none;opacity:1}}
+
+  #guessPanel{position:absolute;right:12px;bottom:12px;z-index:950;width:min(44vw,420px);height:min(40vh,320px);border-radius:var(--radius);overflow:hidden;box-shadow:var(--shadow);border:1px solid var(--line);background:var(--panel);transition:width .2s,height .2s;display:flex;flex-direction:column}
+  #guessPanel.big{width:min(70vw,760px);height:min(70vh,560px)}
+  #guessMap{flex:1;min-height:0}
+  .panelbar{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px;background:var(--panel)}
+  .panelbar .gbtn{padding:9px 16px;font-size:14px}
+  .panelbar .tiny{background:transparent;color:var(--muted);border:1px solid var(--line);padding:6px 10px;font-size:12px}
+  .maplibregl-ctrl-attrib{font-size:10px}
+
+  /* ---------- reveal ---------- */
+  #reveal{position:absolute;inset:0;z-index:1000;background:rgba(10,12,16,.72);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:16px;overflow:auto}
+  .reveal-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);width:100%;max-width:980px;display:grid;grid-template-columns:1.2fr 1fr;overflow:hidden}
+  #revealMap{min-height:360px;background:#111}
+  .reveal-body{padding:22px;display:flex;flex-direction:column;gap:14px}
+  .score-big{font-size:44px;font-weight:800;line-height:1;color:var(--accent)}
+  .score-sub{color:var(--muted);font-size:13px}
+  .stop{display:flex;gap:12px;align-items:center}
+  .stop img{width:96px;height:72px;object-fit:cover;border-radius:10px;background:#222}
+  .stop .t{font-weight:700;font-size:17px} .stop .s{color:var(--muted);font-size:13px}
+  .tour{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;gap:12px;align-items:center}
+  .tour img{width:84px;height:84px;object-fit:cover;border-radius:10px;background:#222}
+  .tour .name{font-weight:700;line-height:1.3}
+  .tour .meta{color:var(--muted);font-size:13px;margin-top:4px}
+  .tour .price{color:var(--accent2);font-weight:800;font-size:18px}
+  .tour a.gbtn{display:inline-block;text-decoration:none;margin-top:8px;padding:9px 14px;font-size:14px}
+  .credit{font-size:11px;color:var(--muted)}
+  .reveal-actions{margin-top:auto;display:flex;justify-content:flex-end;gap:8px}
+
+  /* ---------- end ---------- */
+  .rounds{list-style:none;padding:0;margin:0 0 18px;display:grid;gap:6px;text-align:left}
+  .rounds li{display:grid;grid-template-columns:28px 1fr auto auto;gap:10px;align-items:center;background:var(--panel2);border-radius:10px;padding:9px 12px;font-size:14px}
+  .rounds .sq{font-size:18px}
+  .rounds .d{color:var(--muted);font-size:12px}
+  .rounds .p{font-weight:700;min-width:52px;text-align:right}
+  .share{background:var(--panel2);border:1px dashed var(--line);border-radius:10px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;white-space:pre-wrap;text-align:left;margin-bottom:12px}
+  .actions{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+  .gtoast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:#111;padding:8px 14px;border-radius:999px;font-size:13px;z-index:1100;opacity:0;transition:opacity .2s}
+  .gtoast.show{opacity:1}
+
+  /* the site middleware injects a bottom nav + FAB on every page; the game is full-screen */
+  body nav.xo-bottom-nav,body #xo-ui-fab,body #xo-fixed-account-wrap{display:none!important}
+
+  .sv-marker{width:18px;height:18px;border-radius:50%;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.5)}
+  .sv-marker.guess{background:var(--accent)} .sv-marker.truth{background:var(--good)}
+
+  @media (max-width:760px){
+    .rules{grid-template-columns:1fr}
+    #guessPanel{left:12px;right:12px;width:auto;height:150px}
+    #guessPanel.big{width:auto;height:62vh}
+    #hints{max-width:70vw;font-size:12px}
+    .reveal-card{grid-template-columns:1fr}
+    #revealMap{min-height:240px}
+    .score-big{font-size:36px}
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== INTRO ===== -->
+<section id="intro" class="screen">
+  <div class="gcard">
+    <div class="topbar">
+      <span class="brand">XO Tours · <span data-i18n="puzzle">每日一題</span> #1 · 2026-11-06</span>
+      <span class="lang"><button data-lang="zh-Hant">中文</button> <button data-lang="en">EN</button></span>
+    </div>
+    <h1 data-i18n="title">猜猜這一站</h1>
+    <p class="glead" data-i18n="lead">看 360° 實景，猜這是哪裡。在地圖上放下圖釘，離得越近分數越高。五關都是 XO Tours 真實行程的景點。</p>
+    <ul class="rules">
+      <li><b>5 <span data-i18n="rounds">關</span></b><span data-i18n="r1">每關最高 5,000 分</span></li>
+      <li><b data-i18n="hintsTitle">提示</b><span data-i18n="r2">每 10 秒解鎖一個提示：國家、城市、團名</span></li>
+      <li><b data-i18n="bonusTitle">時間加分</b><span data-i18n="r3">60 秒內作答另加最多 500 分</span></li>
+    </ul>
+    <button class="gbtn" id="startBtn" data-i18n="start">開始遊戲</button>
+    <p class="credit" style="margin:14px 0 0" data-i18n="proto">原型版本，僅供內部測試。</p>
+  </div>
+</section>
+
+<!-- ===== GAME ===== -->
+<section id="game" class="screen hidden">
+  <div id="pano"></div>
+  <div id="photoFallback" class="hidden"><div class="note" data-i18n="noPano">此站暫無 360° 實景，顯示照片</div></div>
+
+  <div class="hud">
+    <div class="chip"><span><span class="muted" data-i18n="round">第</span> <b id="roundNo">1</b><span class="muted">/5</span></span><span><span class="muted" data-i18n="total">總分</span> <b id="totalScore">0</b></span></div>
+    <div class="chip"><span class="muted">⏱</span><b id="timer">0:00</b></div>
+  </div>
+  <div id="hints"></div>
+
+  <div id="guessPanel">
+    <div id="guessMap"></div>
+    <div class="panelbar">
+      <button class="tiny" id="sizeBtn" data-i18n="bigger">放大地圖</button>
+      <span class="credit" id="pinHint" data-i18n="tapMap">點地圖放下圖釘</span>
+      <button class="gbtn" id="guessBtn" disabled data-i18n="guess">確定答案</button>
+    </div>
+  </div>
+
+  <div id="reveal" class="hidden">
+    <div class="reveal-card">
+      <div id="revealMap"></div>
+      <div class="reveal-body">
+        <div>
+          <div class="score-big"><span id="rScore">0</span> <span style="font-size:16px;color:var(--muted)" data-i18n="pts">分</span></div>
+          <div class="score-sub" id="rDetail"></div>
+        </div>
+        <div class="stop">
+          <img id="rPhoto" alt="">
+          <div><div class="t" id="rTitle"></div><div class="s" id="rSub"></div><div class="credit" id="rCredit"></div></div>
+        </div>
+        <div class="tour">
+          <img id="tImg" alt="">
+          <div style="flex:1">
+            <div class="credit" data-i18n="fromTour">這一站來自</div>
+            <div class="name" id="tName"></div>
+            <div class="meta" id="tMeta"></div>
+            <div class="price" id="tPrice"></div>
+            <a class="gbtn" id="tLink" target="_blank" rel="noopener" data-i18n="seeTour">看這個行程</a>
+          </div>
+        </div>
+        <div class="reveal-actions"><button class="gbtn" id="nextBtn" data-i18n="next">下一關</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== END ===== -->
+<section id="end" class="screen hidden">
+  <div class="gcard">
+    <div class="brand">XO Tours · <span data-i18n="puzzle">每日一題</span> #1</div>
+    <h2 data-i18n="done">完成！</h2>
+    <div class="score-big" style="margin:8px 0 2px"><span id="eTotal">0</span><span style="font-size:16px;color:var(--muted)"> / 25,000</span></div>
+    <p class="glead" id="eVerdict"></p>
+    <ul class="rounds" id="eRounds"></ul>
+    <div class="share" id="shareText"></div>
+    <div class="actions">
+      <button class="gbtn" id="shareBtn" data-i18n="share">分享成績</button>
+      <button class="gbtn-ghost" id="againBtn" data-i18n="again">再玩一次</button>
+      <a class="gbtn-ghost" style="text-decoration:none;display:inline-block" href="https://xotours.net/" target="_blank" rel="noopener" data-i18n="browse">看所有行程</a>
+    </div>
+  </div>
+</section>
+
+<div class="gtoast" id="toast"></div>
+
+<script src="vendor/maplibre/maplibre-gl.js"></script>
+<script>
+/* =========================================================================
+   DATA — five fixed stops, copied from places_data/tour_<id>_places.json and
+   includes/all_tours.json + kv_json_exports/tour_<id>.json (title/price/dates).
+   lat/lng = the point we score against (the curated view360 point when present).
+   ========================================================================= */
+const STOPS = [
+  { slug:'casablanca', tour:'7540', lat:33.6085, lng:-7.6327,
+    title:{zh:'哈桑二世清真寺・卡薩布蘭卡',en:'Hassan II Mosque, Casablanca'},
+    country:{zh:'摩洛哥',en:'Morocco'}, city:{zh:'卡薩布蘭卡',en:'Casablanca'},
+    photo:'https://xotours.net/images/tour_7540/day_2.jpg', credit:'',
+    pano:{type:'local', src:'panoramas/hassan-ii-mosque.jpg'} },
+  { slug:'sagrada-familia', tour:'7544', lat:41.4036, lng:2.1744,
+    title:{zh:'巴賽隆納聖家族大教堂',en:'Sagrada Família'},
+    country:{zh:'西班牙',en:'Spain'}, city:{zh:'巴塞隆納',en:'Barcelona'},
+    photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/e/ef/SF_maig_2_cropped.jpg/1280px-SF_maig_2_cropped.jpg', credit:'Photo: Canaan, CC BY-SA 4.0, Wikimedia Commons',
+    pano:{type:'sv'} },
+  { slug:'lake-louise', tour:'7556', lat:51.4254, lng:-116.1773,
+    title:{zh:'露易斯湖',en:'Lake Louise'},
+    country:{zh:'加拿大',en:'Canada'}, city:{zh:'班夫國家公園',en:'Banff National Park'},
+    photo:'https://thumb.wikimedia.org/wikipedia/commons/thumb/f/f1/Lake_Louise_17092005.jpg/1280px-Lake_Louise_17092005.jpg', credit:'Photo: Gorgo, public domain, Wikimedia Commons',
+    pano:{type:'sv'} },
+  { slug:'milford-sound', tour:'7539', lat:-44.6716, lng:167.9256,
+    title:{zh:'米佛峽灣',en:'Milford Sound'},
+    country:{zh:'紐西蘭',en:'New Zealand'}, city:{zh:'峽灣國家公園',en:'Fiordland'},
+    photo:'https://thumb.wikimedia.org/wikipedia/commons/thumb/b/b6/Milford_Sound_%28New_Zealand%29.JPG/1280px-Milford_Sound_%28New_Zealand%29.JPG', credit:'Photo: Maros Mraz, CC BY-SA 3.0, Wikimedia Commons',
+    pano:{type:'sv'} },
+  { slug:'great-ocean-road', tour:'7538', lat:-38.6669, lng:143.6247,
+    title:{zh:'大洋路・十二門徒岩',en:'Great Ocean Road, Twelve Apostles'},
+    country:{zh:'澳洲',en:'Australia'}, city:{zh:'維多利亞州',en:'Victoria'},
+    photo:'https://thumb.wikimedia.org/wikipedia/commons/thumb/8/87/The_Twelve_Apostles_Victoria_Australia_2006.JPG/1280px-The_Twelve_Apostles_Victoria_Australia_2006.JPG', credit:'Photo: Thomas Enguehard, CC BY 3.0, Wikimedia Commons',
+    pano:{type:'sv'} },
+];
+const TOURS = {
+  '7540':{name:'2026年 11/30 北非摩洛哥10日', image:'/images/2020/04/19/morocco.jpg', price:'1999', date:'2026年 11/30', dur:'10日9晚'},
+  '7544':{name:'2026年 11/22 西班牙、葡萄牙尋秘10天之旅', image:'/images/2020/04/19/plaza-espana.png', price:'2999', date:'2026年11月22日', dur:'10日9晚'},
+  '7556':{name:'2026 洛磯山脈 (尊貴) 6或7天 之旅', image:'/images/2021/10/31/moriane.png', price:'', date:'全年發團', dur:'6-7日'},
+  '7539':{name:'2026年新西蘭南島休閒之旅 7日6晚', image:'/images/2025/11/task_01kb6h5pmcfvn9n0tzxh36290a_1764377253_img_0.webp', price:'1439', date:'全年發團', dur:'7日6晚'},
+  '7538':{name:'2026年澳洲墨爾本 & 雪梨精華遊 8天7晚', image:'/images/2025/11/aug=cover.png', price:'1599', date:'全年發團', dur:'8天7晚'},
+};
+const SITE = 'https://xotours.net';
+const GMAPS_KEY = 'AIzaSyCz-MTr7vRMCdUto_-jQhpn7mzhKNKnGQY';            // same browser key the site uses (referrer-restricted)
+const TILE_STYLE = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+
+/* ---------- i18n ---------- */
+const I18N = {
+  'zh-Hant':{puzzle:'每日一題',title:'猜猜這一站',lead:'看 360° 實景，猜這是哪裡。在地圖上放下圖釘，離得越近分數越高。五關都是 XO Tours 真實行程的景點。',rounds:'關',r1:'每關最高 5,000 分',hintsTitle:'提示',r2:'每 10 秒解鎖一個提示：國家、城市、團名',bonusTitle:'時間加分',r3:'60 秒內作答另加最多 500 分',start:'開始遊戲',proto:'原型版本，僅供內部測試。',noPano:'此站暫無 360° 實景，顯示照片',round:'第',total:'總分',bigger:'放大地圖',smaller:'縮小地圖',tapMap:'點地圖放下圖釘',pinned:'已放下圖釘',guess:'確定答案',pts:'分',fromTour:'這一站來自',seeTour:'看這個行程',next:'下一關',finish:'看總成績',done:'完成！',share:'分享成績',copied:'已複製到剪貼簿',again:'再玩一次',browse:'看所有行程',
+    hintCountry:'國家',hintCity:'城市',hintTour:'行程',hintLocked:'秒後解鎖',
+    detail:(d,t,b)=>`距離 ${fmtKm(d)} · 用時 ${t} 秒 · 時間加分 +${b}`,
+    verdict:s=>s>=20000?'旅遊達人！這幾站你大概都去過了。':s>=12000?'不錯喔，離達人只差一點。':'再看一次這些地方，下次一定更近。',
+    price:p=>p?`每人 US$${Number(p).toLocaleString()} 起`:'價格請洽詢',
+    shareLine:'我在 XO Tours「猜猜這一站」#1 拿到 {s}/25,000 分'},
+  en:{puzzle:'Daily puzzle',title:'Guess the Stop',lead:'Look around a 360° view and guess where you are. Drop a pin on the map; the closer you are, the more you score. All five stops are real XO Tours itinerary stops.',rounds:'rounds',r1:'Up to 5,000 points per round',hintsTitle:'Hints',r2:'One hint unlocks every 10 s: country, city, tour',bonusTitle:'Time bonus',r3:'Up to 500 extra points for answering within 60 s',start:'Start',proto:'Prototype, internal testing only.',noPano:'No 360° view for this stop yet, showing a photo',round:'Round',total:'Total',bigger:'Bigger map',smaller:'Smaller map',tapMap:'Tap the map to drop a pin',pinned:'Pin placed',guess:'Guess',pts:'pts',fromTour:'This stop is on',seeTour:'See this tour',next:'Next round',finish:'See results',done:'Done!',share:'Share result',copied:'Copied to clipboard',again:'Play again',browse:'Browse all tours',
+    hintCountry:'Country',hintCity:'City',hintTour:'Tour',hintLocked:'s to unlock',
+    detail:(d,t,b)=>`${fmtKm(d)} away · ${t} s · time bonus +${b}`,
+    verdict:s=>s>=20000?'Globetrotter! You have probably been to most of these.':s>=12000?'Nice. Almost a globetrotter.':'Have another look at these places, you will get closer next time.',
+    price:p=>p?`from US$${Number(p).toLocaleString()} per person`:'Price on request',
+    shareLine:'I scored {s}/25,000 on XO Tours Guess the Stop #1'},
+};
+let LANG = new URLSearchParams(location.search).get('lang')
+        || (function(){ try{ return localStorage.getItem('xo_play_lang'); }catch(e){ return null; } })()
+        || ((navigator.language||'').toLowerCase().startsWith('en') ? 'en' : 'zh-Hant');
+if(!I18N[LANG]) LANG='zh-Hant';
+const T = k => I18N[LANG][k];
+const L = o => o[LANG==='en'?'en':'zh'];
+function applyLang(){
+  document.documentElement.lang = LANG;
+  document.querySelectorAll('[data-i18n]').forEach(el=>{ const v=T(el.dataset.i18n); if(typeof v==='string') el.textContent=v; });
+  document.querySelectorAll('[data-lang]').forEach(b=>b.classList.toggle('on',b.dataset.lang===LANG));
+  try{localStorage.setItem('xo_play_lang',LANG);}catch(e){}
+}
+document.querySelectorAll('[data-lang]').forEach(b=>b.addEventListener('click',()=>{LANG=b.dataset.lang;applyLang();}));
+
+/* ---------- helpers ---------- */
+const $ = id => document.getElementById(id);
+function haversineKm(a,b){
+  const R=6371,toR=x=>x*Math.PI/180;
+  const dLat=toR(b.lat-a.lat),dLng=toR(b.lng-a.lng);
+  const s=Math.sin(dLat/2)**2+Math.cos(toR(a.lat))*Math.cos(toR(b.lat))*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+function fmtKm(km){ return km<1?`${Math.round(km*1000)} m`:km<100?`${km.toFixed(1)} km`:`${Math.round(km).toLocaleString()} km`; }
+// Distance score: 4,500 max, exponential decay, ~half at 1,000 km (world-scale puzzle). Time bonus: 500 → 0 over 60 s.
+function scoreRound(km,sec){
+  const dist = Math.round(4500*Math.exp(-km/1450));
+  const bonus = Math.round(500*Math.max(0,1-sec/60));
+  return {dist,bonus,total:dist+bonus};
+}
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
+function mkMarker(cls){ const d=document.createElement('div'); d.className='sv-marker '+cls; return d; }
+
+/* ---------- state ---------- */
+const state = { round:0, results:[], guess:null, t0:0, timer:null, hintsShown:0 };
+let guessMap, guessMarker, revealMap, svPano, pnlmViewer, gmapsReady=null, gmapsFailed=false;
+
+/* ---------- Google Maps JS (Street View only), lazy ---------- */
+window.gm_authFailure = function(){ gmapsFailed=true; console.warn('[play] Google Maps auth failed for this origin; falling back to photos'); };
+function loadGmaps(){
+  if(gmapsReady) return gmapsReady;
+  gmapsReady = new Promise(res=>{
+    window.__xoPlayGm = ()=>res(true);
+    const s=document.createElement('script'); s.id='gmaps-script'; s.async=true;
+    s.src=`https://maps.googleapis.com/maps/api/js?key=${GMAPS_KEY}&callback=__xoPlayGm&loading=async`;
+    s.onerror=()=>{gmapsFailed=true;res(false);};
+    document.head.appendChild(s);
+    setTimeout(()=>res(!!(window.google&&google.maps)),8000);
+  });
+  return gmapsReady;
+}
+function findPano(lat,lng){
+  // Same idea as js/tour-hero-360.js probeStopForPanoramas, trimmed: Google-source first, then outdoor, 5-point cross.
+  const svc=new google.maps.StreetViewService();
+  const offs=[[0,0],[0.002,0],[-0.002,0],[0,0.002],[0,-0.002]];
+  const tryOne=(src,o)=>new Promise(r=>svc.getPanorama({location:{lat:lat+o[0],lng:lng+o[1]},radius:250,source:src,preference:google.maps.StreetViewPreference.NEAREST},(d,st)=>r(st==='OK'&&d&&d.location?d:null)));
+  return (async()=>{
+    for(const src of [google.maps.StreetViewSource.GOOGLE, google.maps.StreetViewSource.OUTDOOR]){
+      for(const o of offs){ const d=await tryOne(src,o); if(d) return d; }
+    }
+    return null;
+  })();
+}
+
+/* ---------- pano rendering ---------- */
+async function showPano(stop){
+  const pano=$('pano'), fb=$('photoFallback');
+  fb.classList.add('hidden'); pano.classList.remove('hidden'); pano.innerHTML='';
+  if(pnlmViewer){ try{pnlmViewer.destroy();}catch(e){} pnlmViewer=null; }
+  svPano=null;
+  if(stop.pano.type==='local'){
+    await loadPannellum();
+    pnlmViewer = pannellum.viewer('pano',{type:'equirectangular',panorama:stop.pano.src,autoLoad:true,showControls:false,compass:false,hfov:100,autoRotate:-2,hotSpotDebug:false});
+    return;
+  }
+  const ok = await loadGmaps();
+  if(ok && !gmapsFailed){
+    try{
+      const d = await findPano(stop.lat,stop.lng);
+      // gm_authFailure fires asynchronously after the script loads (RefererNotAllowedMapError on
+      // an origin the key does not allow) - re-check before building a panorama on a dead API.
+      if(d && !gmapsFailed){
+        svPano = new google.maps.StreetViewPanorama(pano,{pano:d.location.pano,disableDefaultUI:true,addressControl:false,showRoadLabels:false,linksControl:false,clickToGo:true,motionTracking:false,pov:{heading:0,pitch:5}});
+        const okStatus = await new Promise(r=>{ let done=false; svPano.addListener('status_changed',()=>{ if(done) return; done=true; r(svPano.getStatus()==='OK'); }); setTimeout(()=>{ if(!done){done=true;r(false);} },6000); });
+        if(okStatus) return;
+      }
+    }catch(e){ console.warn('[play] street view failed',e); }
+  }
+  // fallback: photo
+  pano.classList.add('hidden'); fb.classList.remove('hidden');
+  fb.style.backgroundImage=`url("${stop.photo}")`;
+}
+let pnlmP=null;
+function loadPannellum(){
+  if(window.pannellum) return Promise.resolve();
+  if(pnlmP) return pnlmP;
+  pnlmP=new Promise((res,rej)=>{ const s=document.createElement('script'); s.src='vendor/pannellum/pannellum.js'; s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+  return pnlmP;
+}
+
+/* ---------- guess map ---------- */
+function initGuessMap(){
+  if(guessMap) return;
+  guessMap = new maplibregl.Map({container:'guessMap',style:TILE_STYLE,center:[20,20],zoom:0.8,attributionControl:{compact:true}});
+  guessMap.addControl(new maplibregl.NavigationControl({showCompass:false}),'top-left');
+  guessMap.on('click',e=>{
+    state.guess={lat:e.lngLat.lat,lng:e.lngLat.lng};
+    if(!guessMarker){ guessMarker=new maplibregl.Marker({element:mkMarker('guess')}).setLngLat(e.lngLat).addTo(guessMap); }
+    else guessMarker.setLngLat(e.lngLat);
+    $('guessBtn').disabled=false; $('pinHint').textContent=T('pinned');
+  });
+}
+function resetGuessMap(){
+  state.guess=null; if(guessMarker){guessMarker.remove();guessMarker=null;}
+  $('guessBtn').disabled=true; $('pinHint').textContent=T('tapMap');
+  if(guessMap){ guessMap.jumpTo({center:[20,20],zoom:0.8}); guessMap.resize(); }
+}
+$('sizeBtn').addEventListener('click',()=>{ const p=$('guessPanel'); p.classList.toggle('big'); $('sizeBtn').textContent=p.classList.contains('big')?T('smaller'):T('bigger'); setTimeout(()=>guessMap&&guessMap.resize(),220); });
+
+/* ---------- hints + timer ---------- */
+const HINT_AT=[10,20,30];
+function renderHints(sec){
+  const stop=STOPS[state.round];
+  const vals=[L(stop.country),L(stop.city),TOURS[stop.tour].name];
+  const labels=[T('hintCountry'),T('hintCity'),T('hintTour')];
+  $('hints').innerHTML = HINT_AT.map((at,i)=> sec>=at
+    ? `<div class="hint"><b>${labels[i]}</b> · ${vals[i]}</div>`
+    : (i===0||sec>=HINT_AT[i-1] ? `<div class="hint locked">${labels[i]} · ${at-sec}${T('hintLocked')}</div>` : '')).join('');
+}
+function startTimer(){
+  state.t0=Date.now(); clearInterval(state.timer);
+  const tick=()=>{ const s=Math.floor((Date.now()-state.t0)/1000); $('timer').textContent=`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; renderHints(s); };
+  tick(); state.timer=setInterval(tick,1000);
+}
+
+/* ---------- flow ---------- */
+async function startRound(){
+  const stop=STOPS[state.round];
+  $('roundNo').textContent=state.round+1;
+  $('reveal').classList.add('hidden');
+  $('guessPanel').classList.remove('big'); $('sizeBtn').textContent=T('bigger');
+  resetGuessMap();
+  startTimer();
+  showPano(stop);
+}
+$('startBtn').addEventListener('click',()=>{
+  state.round=0; state.results=[]; $('totalScore').textContent='0';
+  $('intro').classList.add('hidden'); $('end').classList.add('hidden'); $('game').classList.remove('hidden');
+  initGuessMap(); setTimeout(()=>guessMap.resize(),50);
+  startRound();
+});
+$('guessBtn').addEventListener('click',()=>{
+  if(!state.guess) return;
+  clearInterval(state.timer);
+  const stop=STOPS[state.round];
+  const sec=Math.floor((Date.now()-state.t0)/1000);
+  const km=haversineKm(state.guess,stop);
+  const sc=scoreRound(km,sec);
+  state.results.push({stop,km,sec,...sc});
+  const total=state.results.reduce((a,r)=>a+r.total,0);
+  $('totalScore').textContent=total.toLocaleString();
+  showReveal(stop,km,sec,sc,total);
+});
+function showReveal(stop,km,sec,sc){
+  const t=TOURS[stop.tour];
+  $('rScore').textContent=sc.total.toLocaleString();
+  $('rDetail').textContent=T('detail')(km,sec,sc.bonus);
+  $('rPhoto').src=stop.photo; $('rTitle').textContent=L(stop.title); $('rSub').textContent=`${L(stop.city)} · ${L(stop.country)}`; $('rCredit').textContent=stop.credit||'';
+  $('tImg').src=t.image.startsWith('/')?SITE+t.image:t.image; $('tName').textContent=t.name; $('tMeta').textContent=`${t.date} · ${t.dur}`; $('tPrice').textContent=T('price')(t.price);
+  $('tLink').href=`${SITE}/${stop.tour}/?utm_source=play&utm_medium=game&utm_campaign=guess_the_stop`;
+  $('nextBtn').textContent = state.round===STOPS.length-1 ? T('finish') : T('next');
+  $('reveal').classList.remove('hidden');
+  // reveal map: both pins + line
+  if(revealMap){ revealMap.remove(); revealMap=null; }
+  revealMap = new maplibregl.Map({container:'revealMap',style:TILE_STYLE,center:[stop.lng,stop.lat],zoom:2,attributionControl:{compact:true},interactive:true});
+  new maplibregl.Marker({element:mkMarker('truth')}).setLngLat([stop.lng,stop.lat]).addTo(revealMap);
+  new maplibregl.Marker({element:mkMarker('guess')}).setLngLat([state.guess.lng,state.guess.lat]).addTo(revealMap);
+  revealMap.on('load',()=>{
+    revealMap.addSource('line',{type:'geojson',data:{type:'Feature',geometry:{type:'LineString',coordinates:[[state.guess.lng,state.guess.lat],[stop.lng,stop.lat]]}}});
+    revealMap.addLayer({id:'line',type:'line',source:'line',paint:{'line-color':'#ff8a3d','line-width':2,'line-dasharray':[2,2]}});
+    const b=new maplibregl.LngLatBounds([state.guess.lng,state.guess.lat],[state.guess.lng,state.guess.lat]).extend([stop.lng,stop.lat]);
+    revealMap.fitBounds(b,{padding:60,maxZoom:10,duration:600});
+  });
+}
+$('nextBtn').addEventListener('click',()=>{
+  if(state.round<STOPS.length-1){ state.round++; startRound(); }
+  else showEnd();
+});
+function sq(p){ return p>=4000?'🟩':p>=2000?'🟨':'🟥'; }
+function showEnd(){
+  clearInterval(state.timer);
+  const total=state.results.reduce((a,r)=>a+r.total,0);
+  $('game').classList.add('hidden'); $('end').classList.remove('hidden');
+  $('eTotal').textContent=total.toLocaleString();
+  $('eVerdict').textContent=T('verdict')(total);
+  $('eRounds').innerHTML=state.results.map((r,i)=>`<li><span class="sq">${sq(r.total)}</span><span>${L(r.stop.title)}<div class="d">${fmtKm(r.km)} · ${r.sec}s</div></span><span></span><span class="p">${r.total.toLocaleString()}</span></li>`).join('');
+  const line=T('shareLine').replace('{s}',total.toLocaleString());
+  $('shareText').textContent=`${line}\n${state.results.map(r=>sq(r.total)).join('')}\n${location.origin}${location.pathname}`;
+  console.info('[play] result',{total,rounds:state.results.map(r=>({slug:r.stop.slug,km:Math.round(r.km),sec:r.sec,score:r.total}))});
+}
+$('shareBtn').addEventListener('click',async()=>{
+  const text=$('shareText').textContent;
+  if(navigator.share){ try{ await navigator.share({text}); return; }catch(e){} }
+  try{ await navigator.clipboard.writeText(text); toast(T('copied')); }catch(e){ toast(text); }
+});
+$('againBtn').addEventListener('click',()=>{ $('end').classList.add('hidden'); $('intro').classList.remove('hidden'); });
+
+applyLang();
+</script>
+</body>
+</html>
